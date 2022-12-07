@@ -1,165 +1,81 @@
-import mimetypes
-import os
 import socket
+import os
+from datetime import datetime
+import random
+import logging
+
+sock = socket.socket()
+logging.basicConfig(filename="sample.log", level=logging.INFO)
+
+try:
+    with open('settings.txt', 'r') as f:
+        settings = f.read().split('\n')
+    port = int(settings[0])
+    dirname = settings[1]
+    max_size = int(settings[2])
+    type_list = settings[3].split()
+except:
+    settings = open('settings.txt', 'w')
+    for i in ['80', os.getcwd(), '8192',' '.join(['html', 'jpeg', 'png'])]:
+        settings.write(i + '\n')
+    settings.close()
+    port = 80
+    dirname = os.getcwd()
+    max_size = 8192
+    type_list = ['html', 'jpeg', 'png']
+
+try:
+    sock.bind(('', port))
+except:
+    port = random.randint(8080, 8300)
+    sock.bind(('', port))
+sock.listen()
+
+print('Порт: {}'.format(port))
 
 
-class BrowserRequest():
-
-    def __init__(self, data: bytes):
-        lines = [d.strip() for d in data.decode('utf8','replace').split("\n") if d.strip()]
-
-        # First line takes the form of
-        # GET /file/path/ HTTP/1.1
-        self.method, self.path, self.http_version = lines.pop(0).split(" ")
-        self.info = {k: v for k, v in (l.split(': ') for l in lines)}
-
-    def __repr__(self) -> str:
-        return "<BrowserRequest {method} {path} {http_version}>".format(
-            method=self.method, path=self.path, http_version=self.http_version)
-
-    def __getattr__(self, name: str):
-        try:
-            return self.info["-".join([n.capitalize() for n in name.split('_')])]
-        except IndexError:
-            raise AttributeError(name)
+def cret(msg_name, dirname):
+    with open(os.path.join(dirname, msg_name), 'rb') as f:
+        data = f.read()
+    return data
 
 
-class ServerSocket():
-    """Simplified interface for interacting with a web server socket"""
-
-    def __init__(self, host='', port=8080, buffer_size=1024, max_queued_connections=5):
-        self._connection = None
-        self._socket = None
-        self.host = host
-        self.port = port
-        self.buffer_size = buffer_size
-        self.max_queued_connections = max_queued_connections
-
-    def __repr__(self) -> str:
-        status = 'closed' if self._socket is None else 'open'
-        return "<{status} ServerSocket {host}:{port}>".format(
-            status=status, host=self.host, port=self.port)
-
-    def __enter__(self):
-        self.open()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def open(self):
-        assert self._socket is None, "ServerSocket is already open"
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self._socket.bind((self.host, self.port))
-        except:
-            self.close()
-            raise
+while True:
+    conn, addr = sock.accept()
+    msg = conn.recv(max_size).decode()
+    if msg.split()[1] == '/' or msg.split()[1] == '/index.html':
+        msg_name = 'index.html'
+    else:
+        if not os.path.isfile(os.path.join(dirname, msg.split()[1][1:])):
+            logging.error("{}, {}, {}, {}".format(addr[0], str(datetime.now()), msg.split()[1][1:], '404'))
+            msg_name = '404.html'
         else:
-            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            msg_name = msg.split()[1][1:]
 
-    def close(self):
-        assert self._socket is not None, "ServerSocker is already closed"
-        if self._connection:
-            self._connection.close()
-            self._connection = None
-        self._socket.close()
-        self._socket = None
+    if msg_name.split('.')[-1] in type_list:
+        if msg_name.split('.')[-1] == 'html':
+            data_type = 'text/html'
+            logging.info("{}, {}, {}, {}".format(addr[0], str(datetime.now()), msg_name, '202'))
+        elif msg_name.split('.')[-1] == 'png':
+            data_type = 'image/png'
+            logging.info("{}, {}, {}, {}".format(addr[0], str(datetime.now()), msg_name, '202'))
+        elif msg_name.split('.')[-1] == 'jpeg':
+            data_type = 'image/jpeg'
+            logging.info("{}, {}, {}, {}".format(addr[0], str(datetime.now()), msg_name, '202'))
+    else:
+        logging.error("{}, {}, {}, {}".format(addr[0], str(datetime.now()), msg_name, '403'))
+        msg_name = '403.html'
+        data_type = 'text/html'
+    data = cret(os.path.join(dirname, msg_name), dirname)
 
-    def listen(self) -> BrowserRequest:
-        assert self._socket is not None, "ServerSocker must be open to listen data"
-        self._socket.listen(self.max_queued_connections)
-        self._connection, _ = self._socket.accept()
-        data = self._connection.recv(self.buffer_size)
-        return BrowserRequest(data)
+    answ = """HTTP/1.1 200 OK
+Server: SelfMadeServer v0.0.1
+Date: {}
+Content-type: {}
+Content-length: {}
+Connection: close
 
-    def respond(self, data: bytes):
-        assert self._socket is not None, "ServerSocker must be open to respond"
-        self._connection.send(data)
-        self._connection.close()
+""".format(str(datetime.now()).split('.')[0], data_type, os.path.getsize(os.path.join(dirname, msg_name)))
+    conn.send(answ.encode() + data)
 
-
-class SimpleServer():
-    """A Simple webserver implemented in Python. NOT FOR PRODUCTION USE"""
-
-    STATUSES = {
-        200: 'Ok',
-        404: 'File not found',
-    }
-    response_404 = '<html><h1>404 File Not Found</h1></html>'
-    log_format = "{status_code} - {method} {path} {user_agent}"
-
-    def __init__(self, port=80, homedir=os.path.curdir, page404=None):
-        """
-        Initialize a webserver
-
-        port    -- port to server requests from
-        homedir -- path to serve files out of
-        page404 -- optional path to HTML file for 404 errors
-        """
-        self.socket = ServerSocket(port=port)
-        self.homedir = os.path.abspath(homedir)
-        if page404:
-            with open(page404) as f:
-                self.response_404 = f.read()
-
-    def log(self, msg: str):
-        print(msg)
-
-    def serve(self):
-        self.socket.open()
-        self.log('Opening socket connection {}:{} in {}'.format(
-            self.socket.host, self.socket.port, self.homedir))
-        while True:
-            self.serve_request()
-
-    def stop(self):
-        self.socket.close()
-
-    def serve_request(self):
-        request = self.socket.listen()
-        path = request.path
-        try:
-            body, status_code = self.load_file(path)
-        except IsADirectoryError:
-            path = os.path.join(path, 'index.html')
-            body, status_code = self.load_file(path)
-
-        header = self.get_header(status_code, path)
-        self.socket.respond((header + body).encode())
-        self.log(self.log_format.format(status_code=status_code,
-                                        method=request.method,
-                                        path=request.path,
-                                        user_agent=request.user_agent))
-
-    def get_header(self, status_code: int, path: str):
-        _, file_ext = os.path.splitext(path)
-        return "\n".join([
-            "HTTP/1.1 {} {}".format(status_code, self.STATUSES[status_code]),
-            "Content-Type: {}".format(mimetypes.types_map.get(file_ext, 'application/octet-stream')),
-            "Server: SimplePython Server"
-            "\n\n"
-        ])
-
-    def load_file(self, path):
-        try:
-            with open(os.path.join(self.homedir, path.lstrip('/'))) as f:
-                return f.read(), 200
-        except FileNotFoundError:
-            return self.response_404, 404
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Runs a simple Python server. Not for production')
-    parser.add_argument('port', type=int, help='port to run the server on')
-    args = parser.parse_args()
-    server = SimpleServer(args.port)
-    try:
-        server.serve()
-    except:
-        os._exit(0)
-    finally:
-        server.stop()
+sock.close()
